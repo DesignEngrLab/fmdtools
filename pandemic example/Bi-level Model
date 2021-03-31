@@ -1,0 +1,339 @@
+import numpy as np
+from scipy.optimize import minimize
+from scipy.integrate import odeint
+from scipy.linalg import det
+from sympy import *
+from itertools import product, count
+import pandas as pd
+
+#%%UPPER LEVEL
+
+N = 1000              #Total individuals
+beta_input = 5       #Input Contact rate
+gamma = 1/6          #Recovery rate
+t_total = 100         #Simulation duration
+ULvars = [beta_input] #List holding all upper level parameters
+
+#KNOBS
+UL_knobs = {'Budget multiplier':1e4,
+            'Infection cost multiplier':1e4,
+            'PPE budget %':40,
+            'Staff budget %':60,
+            'PPE supply':15000,
+            'Occ limit': 150,
+            'hosp frac': 20}
+
+
+#INITIALIZATION
+I0, R0 = 1, 0
+S0 = N - I0 - R0
+y0 = S0, I0, R0
+t = np.arange(0, t_total+1, 1)
+
+#SIR Model calculations
+def deriv(y, t, N, b, gamma):
+    S, I, R = y
+    dSdt = -b * S * I / N
+    dIdt = b * S * I / N - gamma * I
+    dRdt = gamma * I
+    SIRvals = dSdt, dIdt, dRdt
+    return SIRvals
+
+#Individual lists for-
+def SIR_list(CR):
+    ret = odeint(deriv, y0, t,args=(N, CR, gamma))
+    S, I, R = ret.T
+    SIR_list = np.round([S, I, R],0)
+    sus = SIR_list[0]       #susceptibles
+    inf = SIR_list[1]       #infectives
+    rec = SIR_list[2]       #recovered
+    inf_total = np.sum(inf)
+    return SIR_list, sus, inf, rec, inf_total  
+
+
+
+# BUDGET ALLOCATION
+def budget_alloc(CR):
+    total_budget = SIR_list(CR)[4]*UL_knobs['Budget multiplier']
+    budget_PPE = (UL_knobs['PPE budget %']/100)*total_budget
+    budget_S = (UL_knobs['Staff budget %']/100)*total_budget
+    return total_budget, budget_PPE, budget_S
+    
+#%%LOWER LEVEL
+
+c_PPE = 100  #$
+w_H = 30     #$/hr
+S_min = 5    #staff 
+H_min = 6    #hrs/week
+
+#LL parameters
+n_PPE, n_S, n_H = symbols('n_PPE n_S n_H')
+LLvars = [n_PPE, n_S, n_H]
+
+
+# %% PRINT INPUT DATA
+
+print("-----------------------------------------------------------------------")
+print("INPUT DATA-")
+print("-----------------------------------------------------------------------")
+print('UPPER LEVEL')
+
+print(f'\nPopulation: {N}')
+print(f'Input contact rate: {ULvars[0]}')
+print(f'Recovery rate: {gamma}' )
+print(f'Simulation duration: {t_total} days')
+print(f'Budget Alloted: ${budget_alloc(ULvars[0])[0]}')
+print('\nKnobs:-')
+print(f"Budget multiplier: {UL_knobs['Budget multiplier']}")
+print(f"Infection cost multiplier: {UL_knobs['Infection cost multiplier']}")
+print(f"PPE Budget: {UL_knobs['PPE budget %']} %")
+print(f"Staff Budget: {UL_knobs['Staff budget %']} %")
+print(f"PPE Supply: {UL_knobs['PPE supply']}")
+print(f"Occupancy limit: {UL_knobs['Occ limit']}\n\n")
+print(f"Hospitalization fraction: {UL_knobs['hosp frac']} %" )
+
+
+print('LOWER LEVEL')
+print(f'\nCost of PPE: ${c_PPE}')
+print(f'Hourly wage for HCPs: ${w_H}/hr')
+print(f'Minimum staff assigned: {S_min}')
+print(f'Minimum hours assigned: {H_min} hours')
+
+print("-----------------------------------------------------------------------")
+# %%LOWER LEVEL OBJECTIVE FUNCTION
+
+
+def obj_ll(LLvars):
+    return (c_PPE*LLvars[0] + LLvars[1]*LLvars[2]*w_H)
+
+def grad(f, var):
+    '''
+    For finding the gradient of a function.
+    Parameters
+    ----------
+    f : Symbolic function
+    var : Array
+        Symbolic variables
+
+    Returns
+    -------
+    Array
+        Gradient vector
+
+    ''' 
+    c = []
+    for v in range(len(var)):
+        c.append(diff(f, var[v]))
+    return c
+
+
+def hess(f, var):
+    '''
+    Generates the Hessian of a function
+
+    Parameters
+    ----------
+    f : Symbolic input function
+
+    var : Array
+        Symbolic variables
+
+    Returns
+    -------
+    Array
+        Hessian matrix
+
+    '''
+    c = grad(f, var)
+    harr = []
+    for v in product(c, var):
+        harr.append(diff(v[0],v[1]))
+    harr = np.reshape(harr, (len(var),len(var)))
+    h = Matrix(harr)
+    h_det = det(h)
+    if h_det >= 0:
+        positive_semi_def = True
+    else:
+        positive_semi_def = False
+    return harr, h_det, positive_semi_def
+
+# UNCOMMENT TO PRINT GRADIENT AND HESSIAN OF LOWER LEVEL
+print('#######################################################################')
+print('# For Lower level #')
+print('###################\n')                                          
+print(f'Gradient vector - \n{grad(obj_ll(LLvars),LLvars)}')
+print('#######################################################################')
+print(f'Hessian matrix - \n{hess(obj_ll(LLvars),LLvars)[0]}\n')
+if hess(obj_ll(LLvars),LLvars)[2] ==True:
+    print('Hessian is positive semidefinite')
+else:
+    print('Hessian is positive semidefinite')
+print('#######################################################################')
+
+
+def cons_ll(LLvars):
+    g1 = LLvars[0] - budget_alloc(ULvars[0])[1]
+    g2 = LLvars[1]*LLvars[2]*w_H - budget_alloc(ULvars[0])[2]
+    g3 = LLvars[0] - UL_knobs['PPE supply']
+    g4 = (SIR_list(ULvars[0])[4]*(UL_knobs['hosp frac']/100) + LLvars[1]) - LLvars[0]
+    g5 = (SIR_list(ULvars[0])[4]*(UL_knobs['hosp frac']/100) + LLvars[1]) - UL_knobs['Occ limit']
+    g6 = S_min*t_total - LLvars[1]
+    g7 = H_min*t_total - LLvars[2]
+    
+    p1 = max(0, g1)**2
+    p2 = max(0, g2)**2
+    if g3<0:p3=0
+    else:p3 = 1e7
+    
+    if g4<0:p4=0
+    else:p4 = 1e7
+    
+    if g5<0:p5=0
+    else:p5 = 1e7
+    
+    if g6<0:p6=0
+    else:p6 = 1e25
+    
+    if g7<0:p7=0
+    else:p7 = 1e25
+    
+    pen_list = [p1, p2, p3, p4, p5, p6, p7]
+    pen = p1 + p2 + p3 + p4 + p5 + p6 +p7
+    return pen, pen_list
+ 
+#Lower level Objective function
+def pen_obj_ll(LLvars):
+    return obj_ll(LLvars) + cons_ll(LLvars)[0]
+
+
+#%%OPTIMIZATION
+
+llx0 = [10000, 2000, 4000]
+LLopt = minimize(pen_obj_ll, llx0, method='nelder-mead',options={'maxiter':1e7, 'maxfev':1e7})
+
+print('\n#######################################################################')
+print('                         ###################') 
+print('                         # For LOWER level #')
+print('                         ###################\n')                                  
+
+print('Optimizer message: ',LLopt.message)
+print('Optimizer success: ',LLopt.success)
+
+print('\nOptimum PPE Quantity: ',np.round(LLopt.x[0],0))
+print('Optimum Staff Assigned: ',np.round(LLopt.x[1],0))
+print('Optimum Hours Assigned: ',np.round(LLopt.x[2],0))
+
+print('\nPenalties: \n',np.vstack(cons_ll(np.round(LLopt.x,0))[1]))
+
+print('\nFeval: ',obj_ll(np.round(LLopt.x,0)))
+print('Penalized obj: ',pen_obj_ll(np.round(LLopt.x,0)))
+print('Allocated budget: ',budget_alloc(ULvars[0])[0])
+print('root: ',sqrt(obj_ll(np.round(LLopt.x,0))))
+
+print('\n#######################################################################')
+
+
+# comb = (ULvars + LLOPT)
+# print(comb)
+
+#%% UPPER LEVEL OBJECTIVE FUNCTION
+
+# var0 = np.append(ULvars[0], LLopt.x)
+def OBJ_UL(var_comb):
+    return UL_knobs['Infection cost multiplier']*(SIR_list(var_comb)[4])
+
+
+def ULred(var_comb):
+    '''
+    
+    Function to take in optimum values of LL decision variables to reduce 
+    contact rate
+
+    '''
+    cr = var_comb[0]
+    countermeasures = var_comb[1:]
+    
+    def coeff_reduct(countermeasures):
+        '''
+        
+        
+        Parameters
+        ----------
+        Newvars[0] : n_PPE
+        Newvars[1] : n_S
+        Newvars[2] : n_H
+
+        Returns
+        -------
+        A coefficient that represents the effect of counter-measures used
+
+        '''
+        denom = (countermeasures[1] + countermeasures[2]*countermeasures[3])
+        denom = np.log(denom)
+        return 8/denom 
+    return cr*(coeff_reduct(var_comb))
+
+
+
+def CONS_UL(var_comb):
+    '''
+    
+    Parameters
+    ----------
+    var : Array of UL and LL variables
+        The LL variables passed to this function are the output of the optimization loop
+
+    Returns
+    -------
+    Penalty value and list of individual penalties on constraint
+
+    '''
+    G1 = ULred(var_comb)*var_comb[0] - var_comb[0]
+    G2 = (var_comb[1]*c_PPE + var_comb[2]*var_comb[3]*w_H) - budget_alloc(var_comb[0])[0]
+    
+    P1 = 1e5 * max(0, G1)**2
+    P2 = max(0, G2)**2
+    
+    PEN_LIST = [P1, P2]
+    PEN = P1 + P2
+    return PEN, PEN_LIST
+
+
+def PEN_OBJ_UL(var_comb):
+    return OBJ_UL(var_comb[0]) + CONS_UL(var_comb)[0]
+
+
+# %%UPPER LEVEL OPTIMIZATION
+var0 = np.append(ULvars[0], LLopt.x)
+ULopt = minimize(PEN_OBJ_UL, var0, method='nelder-mead', options={'maxiter':1e3, 'maxfev':1e3})
+print('#######################################################################')
+print('                         ###################') 
+print('                         # For UPPER level #')
+print('                         ###################\n') 
+
+print('Optimizer message: ',ULopt.message)
+print('Optimizer success: ',ULopt.success)
+
+
+print('\nOptimized Contact Rate: ', ULopt.x[0])
+print('Final Optimum PPE Quantity: ',np.round(ULopt.x[1],0))
+print('Final Optimum Staff Assigned: ',np.round(ULopt.x[2],0))
+print('Final Optimum Hours Assigned: ',np.round(ULopt.x[3],2))
+
+print('\nPenalties: \n',np.vstack(CONS_UL(ULopt.x)[1]))
+
+print('\nFeval: ',OBJ_UL(np.round(ULopt.x[0],0)))
+print('Penalized obj: ',PEN_OBJ_UL(ULopt.x))
+print('Allocated budget: ',budget_alloc(ULopt.x[0])[0])
+
+print('\n#######################################################################')
+
+
+#%% UNCOMMENT TO WRITE `SIR' DATA TO EXCEL FILE "DATA.XLSX"
+
+# dF = pd.DataFrame(SIR_list(ULvars[0])[0])
+# with pd.ExcelWriter("C:\\Users\\varun\\Desktop\\PROJECT\\Data.xlsx",engine='openpyxl', mode='a') as writer:
+#     dF.to_excel(writer, sheet_name=f"Contact rate {UL[0]}")
+# dF = pd.DataFrame(SIR_list(ULopt.x[0])[0])
+# with pd.ExcelWriter("C:\\Users\\varun\\Desktop\\PROJECT\\Data.xlsx",engine='openpyxl', mode='a') as writer:
+#     dF.to_excel(writer, sheet_name=f"Optimized Contact rate {round(ULopt.x[0],4)}")
