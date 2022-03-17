@@ -1,3 +1,9 @@
+## This project has moved!!
+
+Current active development of fmdtools (versions > 0.6.2) is hosted at https://github.com/nasa/fmdtools. This repository is not under active development and is here for archival purposes.
+
+----
+
 <p align="center">
   <img src="docs/figures/logo.png" \>
 </p>
